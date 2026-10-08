@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SightLines</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.1/p5.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; cursor: none; font-family: 'DM Mono', monospace; }
+  canvas { display: block; }
+  #credit {
+    position: fixed; bottom: 14px; left: 0; right: 0; text-align: center;
+    color: rgba(255,255,255,0.55); font-size: 12px; letter-spacing: 0.03em; pointer-events: none;
+  }
+  #credit a { color: inherit; text-decoration: none; pointer-events: auto; }
+</style>
+</head>
+<body>
+<footer id="credit">SightLines · <a href="https://gauravnijjer.com" target="_blank" rel="noopener">© Gaurav Singh Nijjer 2026</a></footer>
+
+<script>
+// ============================================================
+// CONFIG: everything an installer needs to tune lives here
+// ============================================================
+const CONFIG = {
+  START_VIEW: 1,              // which view shows when the page opens (1 to 5)
+  CROSSFADE_SECONDS: 10,      // how long a switch takes after a key press
+
+  LINE_COLOR: '#ffffff',
+  LINE_WEIGHT: 1,
+  LINE_SMOOTHING: 0.9,        // 0 = twitchy, near 1 = slow and fluid
+  CURVE_SMOOTHING: true,      // true = soft curves, false = straight segments
+  INVERT: false,              // true = dark areas push hardest
+  MIRROR: true,               // true = left and right match how the room sees you
+
+  CAM_WIDTH: 480,
+  CAM_HEIGHT: 360,
+
+  // gap between sample points, in camera pixels
+  STEP_VERTICAL: 10,
+  STEP_HORIZONTAL: 10,
+  STEP_DOTS: 10,
+  STEP_PIXELS: 8,
+  STEP_DASHES: 12,
+
+  ELEVATION_VERTICAL: 35,     // how far vertical lines bend, in screen pixels
+  ELEVATION_HORIZONTAL: 35,   // how far horizontal lines bend, in screen pixels
+  DOT_SIZE: 1.0,              // largest dot as a fraction of the gap
+  PIXEL_GAP: 0.1,             // space around each square, 0 = touching
+  DASH_LENGTH: 0.85           // dash length as a fraction of the gap
+};
+
+// Keyboard: 1 vertical lines · 2 horizontal lines · 3 dots · 4 pixels · 5 dashes
+//           F fullscreen
+// ============================================================
+
+const VIEWS = [
+  { name: 'vertical lines',   draw: drawVertical },
+  { name: 'horizontal lines', draw: drawHorizontal },
+  { name: 'dots',             draw: drawDots },
+  { name: 'pixels',           draw: drawPixels },
+  { name: 'dashes',           draw: drawDashes }
+];
+
+let video;
+let target = 0;
+const alphas = VIEWS.map(() => 0);   // current opacity of each view
+const ease = VIEWS.map(() => ({}));  // easing memory, one per view
+let rgb = [255, 255, 255];
+let lastFrame = 0;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  video = createCapture({ video: { width: { ideal: CONFIG.CAM_WIDTH }, height: { ideal: CONFIG.CAM_HEIGHT } }, audio: false });
+  video.size(CONFIG.CAM_WIDTH, CONFIG.CAM_HEIGHT);
+  video.hide();
+  const c = color(CONFIG.LINE_COLOR);
+  rgb = [red(c), green(c), blue(c)];
+  target = constrain(CONFIG.START_VIEW - 1, 0, VIEWS.length - 1);
+  alphas[target] = 1;
+  lastFrame = millis();
+}
+
+function draw() {
+  background(0);
+  const now = millis();
+  const dt = Math.min(now - lastFrame, 100);
+  lastFrame = now;
+
+  video.loadPixels();
+  if (!video.pixels || video.pixels.length < CONFIG.CAM_WIDTH * CONFIG.CAM_HEIGHT * 4) return;
+
+  // every view drifts toward full (if chosen) or zero (if not) over the crossfade time
+  const rate = CONFIG.CROSSFADE_SECONDS > 0 ? dt / (CONFIG.CROSSFADE_SECONDS * 1000) : 1;
+  for (let i = 0; i < VIEWS.length; i++) {
+    const goal = i === target ? 1 : 0;
+    alphas[i] = alphas[i] < goal ? Math.min(goal, alphas[i] + rate) : Math.max(goal, alphas[i] - rate);
+  }
+
+  for (let i = 0; i < VIEWS.length; i++) {
+    if (alphas[i] <= 0.002) { ease[i] = {}; continue; }  // fully faded out, forget its easing
+    // equal power curve, so the picture does not dip in the middle of a fade
+    const a = Math.sin(alphas[i] * Math.PI / 2);
+    push();
+    drawingContext.globalAlpha = a;
+    if (CONFIG.MIRROR) { translate(width, 0); scale(-1, 1); }
+    stroke(CONFIG.LINE_COLOR);
+    strokeWeight(CONFIG.LINE_WEIGHT);
+    noFill();
+    VIEWS[i].draw(ease[i]);
+    pop();
+  }
+  drawingContext.globalAlpha = 1;
+}
+
+function keyPressed() {
+  if (key >= '1' && key <= String(VIEWS.length)) target = Number(key) - 1;
+  else if (key === 'f' || key === 'F') {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+    else document.exitFullscreen();
+  }
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
+// ============================================================
+// helpers
+// ============================================================
+
+// brightness at a camera pixel, 0 to 1
+function bright(x, y) {
+  const i = (x + y * CONFIG.CAM_WIDTH) * 4;
+  const p = video.pixels;
+  const b = (p[i] + p[i + 1] + p[i + 2]) / 765;
+  return CONFIG.INVERT ? 1 - b : b;
+}
+
+// eases a value toward a new target. Not called "smooth" because p5 uses that name
+function easeToward(store, key, value) {
+  const prev = store[key];
+  if (prev === undefined) return (store[key] = value);
+  return (store[key] = prev + (value - prev) * (1 - CONFIG.LINE_SMOOTHING));
+}
+
+function strokeLine(points) {
+  if (points.length < 2) return;
+  beginShape();
+  if (CONFIG.CURVE_SMOOTHING) {
+    curveVertex(points[0].x, points[0].y);
+    for (const p of points) curveVertex(p.x, p.y);
+    curveVertex(points[points.length - 1].x, points[points.length - 1].y);
+  } else {
+    for (const p of points) vertex(p.x, p.y);
+  }
+  endShape();
+}
+
+// ============================================================
+// 1: vertical lines
+// ============================================================
+function drawVertical(store) {
+  const step = CONFIG.STEP_VERTICAL, elev = CONFIG.ELEVATION_VERTICAL;
+  const sx = width / CONFIG.CAM_WIDTH, sy = height / CONFIG.CAM_HEIGHT;
+  for (let x = 0; x < CONFIG.CAM_WIDTH; x += step) {
+    const pts = [];
+    for (let y = 0; y < CONFIG.CAM_HEIGHT; y += step) {
+      const e = easeToward(store, y * 4096 + x, (bright(x, y) * 2 - 1) * elev);
+      pts.push({ x: x * sx + e, y: y * sy });
+    }
+    strokeLine(pts);
+  }
+}
+
+// ============================================================
+// 2: horizontal lines
+// ============================================================
+function drawHorizontal(store) {
+  const step = CONFIG.STEP_HORIZONTAL, elev = CONFIG.ELEVATION_HORIZONTAL;
+  const sx = width / CONFIG.CAM_WIDTH, sy = height / CONFIG.CAM_HEIGHT;
+  for (let y = 0; y < CONFIG.CAM_HEIGHT; y += step) {
+    const pts = [];
+    for (let x = 0; x < CONFIG.CAM_WIDTH; x += step) {
+      const e = easeToward(store, y * 4096 + x, (bright(x, y) * 2 - 1) * elev);
+      pts.push({ x: x * sx, y: y * sy + e });
+    }
+    strokeLine(pts);
+  }
+}
+
+// ============================================================
+// 3: dots, brighter means bigger
+// ============================================================
+function drawDots(store) {
+  const step = CONFIG.STEP_DOTS;
+  const sx = width / CONFIG.CAM_WIDTH, sy = height / CONFIG.CAM_HEIGHT;
+  const maxD = step * Math.min(sx, sy) * CONFIG.DOT_SIZE;
+  const off = step / 2;
+  noStroke();
+  fill(rgb[0], rgb[1], rgb[2]);
+  for (let y = 0; y < CONFIG.CAM_HEIGHT; y += step) {
+    for (let x = 0; x < CONFIG.CAM_WIDTH; x += step) {
+      const d = easeToward(store, y * 4096 + x, bright(x, y)) * maxD;
+      if (d > 0.6) circle((x + off) * sx, (y + off) * sy, d);
+    }
+  }
+}
+
+// ============================================================
+// 4: pixels, brighter means more solid
+// ============================================================
+function drawPixels(store) {
+  const step = CONFIG.STEP_PIXELS;
+  const sx = width / CONFIG.CAM_WIDTH, sy = height / CONFIG.CAM_HEIGHT;
+  const w = step * sx, h = step * sy;
+  const gx = w * CONFIG.PIXEL_GAP / 2, gy = h * CONFIG.PIXEL_GAP / 2;
+  noStroke();
+  for (let y = 0; y < CONFIG.CAM_HEIGHT; y += step) {
+    for (let x = 0; x < CONFIG.CAM_WIDTH; x += step) {
+      const b = easeToward(store, y * 4096 + x, bright(x, y));
+      if (b < 0.02) continue;
+      fill(rgb[0], rgb[1], rgb[2], b * 255);
+      rect(x * sx + gx, y * sy + gy, w - gx * 2 + 0.5, h - gy * 2 + 0.5);
+    }
+  }
+}
+
+// ============================================================
+// 5: dashes that turn with brightness
+// ============================================================
+function drawDashes(store) {
+  const step = CONFIG.STEP_DASHES;
+  const sx = width / CONFIG.CAM_WIDTH, sy = height / CONFIG.CAM_HEIGHT;
+  const half = step * Math.min(sx, sy) * CONFIG.DASH_LENGTH / 2;
+  const off = step / 2;
+  for (let y = 0; y < CONFIG.CAM_HEIGHT; y += step) {
+    for (let x = 0; x < CONFIG.CAM_WIDTH; x += step) {
+      const a = easeToward(store, y * 4096 + x, bright(x, y)) * Math.PI;
+      const cx = (x + off) * sx, cy = (y + off) * sy;
+      const dx = Math.cos(a) * half, dy = Math.sin(a) * half;
+      line(cx - dx, cy - dy, cx + dx, cy + dy);
+    }
+  }
+}
+</script>
+</body>
+</html>
